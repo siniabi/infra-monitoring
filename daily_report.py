@@ -18,7 +18,7 @@ PROJECT_ID = "photomon-1"
 KEY_FILE = "/Users/user/.config/gcloud/claude-code-sa-key.json"
 OBSIDIAN_PATH = Path.home() / "Library/Mobile Documents/com~apple~CloudDocs/Obsidian/Infra"
 GITHUB_REPO = "siniabi/infra-monitoring"
-REPO_LOCAL = Path.home() / "COMPANY/Dev/Infra/monitoring/infra-monitoring"
+REPO_LOCAL = Path("/Volumes/PhotomonSSD/COMPANY/Dev/internal/photomon-www/infra-monitoring")
 
 VMS = [
     {"name": "bizprint1", "zone": "asia-northeast3-b", "domain": "https://biz.photomon.com"},
