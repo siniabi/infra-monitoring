@@ -6,8 +6,6 @@ import sys
 import json
 import datetime
 import subprocess
-import urllib.request
-import ssl
 from pathlib import Path
 
 from google.oauth2 import service_account
@@ -42,19 +40,6 @@ credentials = service_account.Credentials.from_service_account_file(KEY_FILE, sc
 # ─── 유틸 ───────────────────────────────────────────────
 def now_kst():
     return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
-
-
-def check_http(url, timeout=10):
-    """도메인 HTTP 상태 코드 확인"""
-    try:
-        ctx = ssl.create_default_context()
-        req = urllib.request.Request(url, method="HEAD")
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-            return resp.status
-    except urllib.error.HTTPError as e:
-        return e.code
-    except Exception as e:
-        return f"ERR: {type(e).__name__}"
 
 
 # ─── VM 상태 수집 ────────────────────────────────────────
@@ -155,17 +140,99 @@ def get_metrics():
     return all_metrics
 
 
-# ─── HTTP 헬스체크 ────────────────────────────────────────
+# ─── HTTP 헬스체크 (GCP Uptime Check API) ─────────────────
 def check_all_http():
+    """GCP Uptime Check 결과 조회. Uptime Check 미등록 도메인은 '미등록'으로 표시."""
+    uptime_client = monitoring_v3.UptimeCheckServiceClient(credentials=credentials)
+    metric_client = monitoring_v3.MetricServiceClient(credentials=credentials)
+    project_name = f"projects/{PROJECT_ID}"
+
+    # 1) 기존 Uptime Check 설정 로드 → host 기준 매핑
+    checks_by_host = {}
+    for config in uptime_client.list_uptime_check_configs(request={"parent": project_name}):
+        host = config.monitored_resource.labels.get("host", "")
+        check_id = config.name.split("/")[-1]
+        checks_by_host[host] = {
+            "check_id": check_id,
+            "display_name": config.display_name,
+        }
+
+    # 2) 최근 10분간 uptime check 결과 조회
+    end_time = datetime.datetime.now(datetime.timezone.utc)
+    start_time = end_time - datetime.timedelta(minutes=10)
+    interval = monitoring_v3.TimeInterval(start_time=start_time, end_time=end_time)
+
+    # check_passed 메트릭으로 전체 결과 한 번에 조회
+    uptime_results = {}
+    try:
+        ts_list = metric_client.list_time_series(
+            request={
+                "name": project_name,
+                "filter": f'metric.type = "monitoring.googleapis.com/uptime_check/check_passed" AND resource.labels.project_id = "{PROJECT_ID}"',
+                "interval": interval,
+                "view": monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL,
+            }
+        )
+        for ts in ts_list:
+            check_id = ts.metric.labels.get("check_id", "")
+            checker_loc = ts.metric.labels.get("checker_location", "")
+            for point in ts.points:
+                passed = point.value.bool_value
+                if check_id not in uptime_results:
+                    uptime_results[check_id] = {"total": 0, "passed": 0, "locations": []}
+                uptime_results[check_id]["total"] += 1
+                if passed:
+                    uptime_results[check_id]["passed"] += 1
+                uptime_results[check_id]["locations"].append(
+                    {"location": checker_loc, "passed": passed}
+                )
+    except Exception as e:
+        print(f"[WARN] Uptime Check 메트릭 조회 실패: {e}")
+
+    # 3) VM별 결과 매핑
     results = []
     for vm in VMS:
-        if vm["domain"]:
-            status = check_http(vm["domain"])
+        if not vm["domain"]:
+            continue
+        host = vm["domain"].replace("https://", "").replace("http://", "").rstrip("/")
+        check_info = checks_by_host.get(host)
+
+        if not check_info:
             results.append({
                 "name": vm["name"],
                 "domain": vm["domain"],
-                "http_status": status,
+                "http_status": "미등록",
+                "source": "Uptime Check 없음",
             })
+            continue
+
+        check_id = check_info["check_id"]
+        data = uptime_results.get(check_id)
+        if not data or data["total"] == 0:
+            results.append({
+                "name": vm["name"],
+                "domain": vm["domain"],
+                "http_status": "데이터 없음",
+                "source": check_info["display_name"],
+            })
+            continue
+
+        pass_rate = data["passed"] / data["total"] * 100
+        if pass_rate == 100:
+            status = "UP"
+        elif pass_rate > 0:
+            status = f"DEGRADED ({pass_rate:.0f}%)"
+        else:
+            status = "DOWN"
+
+        results.append({
+            "name": vm["name"],
+            "domain": vm["domain"],
+            "http_status": status,
+            "source": check_info["display_name"],
+            "checks": f"{data['passed']}/{data['total']}",
+        })
+
     return results
 
 
@@ -189,9 +256,15 @@ def check_alerts(vm_status, metrics, http_results):
                 alerts.append(f"🔴 디스크 사용량 초과: instance {instance_id} [{device}] → {pct}%")
 
     for h in http_results:
-        if isinstance(h["http_status"], int) and h["http_status"] < 400:
+        status = h["http_status"]
+        if status == "UP" or status == "미등록":
             continue
-        alerts.append(f"🔴 HTTP 이상: {h['name']} ({h['domain']}) → {h['http_status']}")
+        if status == "데이터 없음":
+            alerts.append(f"🟡 Uptime Check 데이터 없음: {h['name']} ({h['domain']})")
+        elif "DEGRADED" in str(status):
+            alerts.append(f"🟡 HTTP 불안정: {h['name']} ({h['domain']}) → {status}")
+        else:
+            alerts.append(f"🔴 HTTP DOWN: {h['name']} ({h['domain']}) → {status}")
 
     return alerts
 
@@ -249,14 +322,27 @@ def generate_report(vm_status, metrics, http_results, alerts):
                 lines.append(f"| {iid} | {device} | {pct}{warn} |")
         lines.append("")
 
-    # HTTP 헬스체크
-    lines.append("## HTTP 헬스체크")
-    lines.append("| VM | 도메인 | 상태 |")
-    lines.append("|---|---|---|")
+    # HTTP 헬스체크 (Uptime Check)
+    lines.append("## HTTP 헬스체크 (GCP Uptime Check)")
+    lines.append("| VM | 도메인 | 상태 | 소스 |")
+    lines.append("|---|---|---|---|")
     for h in http_results:
-        ok = isinstance(h["http_status"], int) and h["http_status"] < 400
-        icon = "🟢" if ok else "🔴"
-        lines.append(f"| {h['name']} | {h['domain']} | {icon} {h['http_status']} |")
+        status = h["http_status"]
+        source = h.get("source", "")
+        checks = h.get("checks", "")
+        if status == "UP":
+            icon = "🟢"
+            display = f"UP ({checks})" if checks else "UP"
+        elif status == "미등록":
+            icon = "⚪"
+            display = "미등록"
+        elif "DEGRADED" in str(status):
+            icon = "🟡"
+            display = f"{status} ({checks})" if checks else status
+        else:
+            icon = "🔴"
+            display = str(status)
+        lines.append(f"| {h['name']} | {h['domain']} | {icon} {display} | {source} |")
     lines.append("")
 
     lines.append("---")
