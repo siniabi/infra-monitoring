@@ -1,85 +1,63 @@
-# 인프라 핸드오프 (2026-03-27)
+# 인프라 핸드오프 (2026-03-31)
 
 ## 레포
-- bizprint-serv: /Users/user/COMPANY/Dev/bizprint/bizprint-serv (feature/sprint-1)
-- bizprint-web: /Users/user/COMPANY/Dev/bizprint/bizprint-web (develop)
-- prepress: /Users/user/COMPANY/Dev/prepress (main)
 - infra: /Users/user/COMPANY/Dev/Infra
 
-## 마지막 완료 (2026-03-26~27)
+## 마지막 완료 (2026-03-30~31)
 
-### 장애 대응
-- 원인: Claude Code가 WAR 배포 후 pkill -9로 Tomcat 종료 → 3시간 22분 다운
-- 재발 방지: settings.json deny 5개 추가, CLAUDE.md 운영서버 금지 규칙 추가
-- systemd Restart=on-failure 30초 설정 완료
-- GCP Uptime Check + Alert Policy + 이메일 3 + SMS 3 설정 완료
-
-### bizprint1 서버 점검
-- catalina.out 6.7GB truncate 완료
-- logrotate 설정 (일 500MB, 7일 보관)
-- 디스크 73% → 68% (11GB 확보)
-- 시스템 저널 3.9GB 삭제
-- Swap 4GB 설정 완료
+### VM 다운그레이드
+- photomon-tplv: 4vCPU → 2vCPU/8GB 완료 ✅
+- photomon-tpls2b: 롤백 후 현재 4vCPU/8GB → 오늘 밤 2vCPU로 재시도 필요
 
 ### GCS 최적화
-- photo-service-file 수명주기 정책 추가
-  - Rule 1: STANDARD/NEARLINE → 90일 후 COLDLINE
-  - Rule 2: COLDLINE → 365일 후 ARCHIVE (월 ~$364 절감 예상)
-- photomon-db-backup 버킷 생성 (STANDARD, 수명주기 포함)
-- 2021년 DB 백업(54.7GB) 삭제
+- photo-service-file 버킷 기본값: COLDLINE → STANDARD 변경 ✅
+- 수명주기: 90일 → 30일 변경 ✅ (STANDARD → 30일 → COLDLINE)
+- 예상 절감: Write 비용 $309 → ~$15/월
 
-### 보안 강화
-- Claude Code 전용 서비스 계정 생성
-  - claude-code@photomon-1.iam.gserviceaccount.com
-  - 권한: storage.objectViewer, compute.viewer, monitoring.viewer, logging.viewer
-  - 현재 활성 계정으로 설정 완료
-- ~/.claude/CLAUDE.md 전역 규칙 추가
-  - 인프라 접속 경로 SSOT
-  - DB/GCS/방화벽 금지 규칙
-  - 막혔을 때 원칙
+### bizprint1 모니터링
+- 매일 03:10 cron 자동 재시작 → systemd Restart=on-failure로 7초 내 자동 복구 확인
+- 알림 발송: 이메일 ✅ / SMS ❌ (300초 조건 미충족 — 정상)
+
+### 확인된 사항
+- IIS VM(tplv/tpls2b)은 IP 직접 접근 시 404 정상 → 도메인으로만 확인
+  - tplv: https://tplv.photomon.com
+  - tpls2b: https://tpls.photomon.com
 
 ## 지금 하던 것 (중단 상태)
-- photomon-tplv SSH 접근 불가 (원인 미확인)
-- GCS photo-service-file 파일 접근 패턴 분석 미완료
-  - 가설: 포토북 제작 중 집중 접근 → 완료 후 거의 없음
-  - clouduploadfile/useruploadfile 15개월 공백 원인 미확인
-  - 버킷 기본 클래스 STANDARD 전환 여부 미결정 (코드 확인 필요)
+- tpls2b 2vCPU 다운그레이드 미완료 → 오늘 밤 야간 작업
 
 ## 다음 할 것
-1. photomon-tplv SSH 접근 방법 확인
-2. 포토몬 파일 처리 로직 확인 (제작 완료 후 파일 삭제 여부)
-3. photo-service-file 버킷 기본 클래스 STANDARD 전환 검토
-4. MSSQL 백업 경로 변경 (photo-service-file → photomon-db-backup)
-5. photomon-sqlserver-vm 백업 스케줄 확인
-6. fail2ban SSH 방어 설정
-7. MSSQL VM 디스크/백업 현황 확인
+1. tpls2b 2vCPU 다운그레이드 (오늘 밤)
+2. bizprint1 + prepress-1 Ops Agent 설치
+3. Windows VM (tplv/tpls2b/sqlserver) Ops Agent 설치 (RDP)
+4. cron 재시작 스크립트 개선 (shutdown 실패 시 복구 로직)
+5. photomon-tplv SSH 접근 방법 확인
+6. MSSQL 백업 경로 변경 (photo-service-file → photomon-db-backup)
+7. fail2ban SSH 방어 설정
+8. Ops Agent 설치 후 JVM Heap 모니터링 추가
 
 ## 주의사항
 - bizprint1 (35.216.17.137) = 운영서버 → 직접 SSH 금지 (상윤님 직접 실행)
 - Claude Code 현재 계정: claude-code@photomon-1.iam.gserviceaccount.com (읽기 전용)
-- 운영 작업 필요 시: gcloud config set account siniabi@gmail.com 으로 전환 후 상윤님 직접 실행
-- DB 접근 막히면 우회 탐색 금지 → 즉시 보고
-- GCS .bak 파일 읽기/다운로드 절대 금지
+- 운영 작업 필요 시: gcloud config set account siniabi@gmail.com 으로 전환
+- IIS VM 서비스 확인은 반드시 도메인으로 (IP 직접 접근 시 404 정상)
+- tpls2b 다운그레이드: 오늘 밤 야간 작업 예정
 - 다음 DB 백업 경로: gs://photomon-db-backup/
+- 성수기(12월) 전 tplv/tpls2b 4vCPU로 원복 필요
 
 ## GCP 인프라 현황
 ### photomon-1 VM (5대)
-| VM | 스펙 | 역할 |
-|---|---|---|
-| bizprint1 | e2-standard-4 | bizprint 운영서버 |
-| photomon-sqlserver-vm | n2-standard-8 | MSSQL DB |
-| photomon-tpls2b | e2-custom-4-8192 | 포토몬 템플릿 |
-| photomon-tplv | e2-custom-4-8192 | 포토몬 템플릿 |
-| prepress-1 | e2-medium | 프리프레스 |
-
-### GCS 버킷
-| 버킷 | 클래스 | 용량 | 용도 |
+| VM | 스펙 | 도메인 | 역할 |
 |---|---|---|---|
-| bizprint_cms | STANDARD | 2.2TB | bizprint 파일 |
-| photo-service-file | COLDLINE | 150.9TB | 포토몬 사진 아카이브 |
-| photo-web-files | ARCHIVE | 261GB | 포토몬 웹 파일 |
-| photomon-db-backup | STANDARD | 신규 | DB 백업 전용 |
+| bizprint1 | e2-standard-4 | biz.photomon.com | bizprint 운영서버 |
+| photomon-sqlserver-vm | n2-standard-8 | — (RDP 전용) | MSSQL DB |
+| photomon-tplv | custom-2-8192 | tplv.photomon.com | 포토몬 템플릿 |
+| photomon-tpls2b | custom-4-8192 | tpls.photomon.com | 포토몬 템플릿 (야간 2vCPU 예정) |
+| prepress-1 | e2-medium | — | 프리프레스 (Docker) |
 
-### 모니터링
-- Uptime Check: biz.photomon.com 5분 간격
-- Alert Policy: 다운 감지 시 이메일 3 + SMS 3 발송
+### GCS 현황
+| 버킷 | 클래스 | 수명주기 |
+|---|---|---|
+| photo-service-file | STANDARD (변경됨) | 30일 후 COLDLINE |
+| photomon-db-backup | STANDARD | 90일→NEARLINE→365일→COLDLINE |
+| bizprint_cms | STANDARD | — |
